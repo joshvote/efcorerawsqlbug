@@ -1,6 +1,8 @@
 using Microsoft.EntityFrameworkCore;
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using Xunit;
 
@@ -8,68 +10,38 @@ namespace EfCoreRawSqlBug
 {
     public class BugTest
     {
-        public class Person
-        {
-            public long PersonID { get; set; }
-            public string Name { get; set; }
-        }
-
         public class Car
         {
-            public long CarID { get; set; }
+            public int CarID { get; set; }
             public string Name { get; set; }
         }
 
         public class CarView
         {
             public string Name { get; set; }
+            public int? Count { get; set; }
+            public int? Price { get; set; }
         }
 
-        public class PersonView
-        {
-            public string Name { get; set; }
-        }
-
-        public class ParentView : PersonView
-        {
-            public long ParentID { get; set; }
-        }
-
-        /// <summary>
-        /// Forced InMemory DbContext
-        /// </summary>
         public class TestContext : DbContext
         {
             public TestContext(DbContextOptions<TestContext> options)
             : base(options)
             { }
 
-            public DbSet<Person> People { get; set; }
             public DbSet<Car> Cars { get; set; }
-
             public DbSet<CarView> CarViews { get; set; }
-            public DbSet<ParentView> ParentViews { get; set; }
 
             protected override void OnModelCreating(ModelBuilder modelBuilder)
             {
-                modelBuilder.Entity<Person>(entity =>
-                {
-                    entity.ToTable("People", "test");
-                    entity.HasKey(e => e.PersonID);
-                });
-
                 modelBuilder.Entity<Car>(entity =>
                 {
                     entity.ToTable("Cars", "test");
                     entity.HasKey(e => e.CarID);
+                    entity.Property(e => e.CarID).ValueGeneratedNever();
                 });
 
                 modelBuilder.Entity<CarView>(entity =>
-                {
-                    entity.HasNoKey();
-                });
-
-                modelBuilder.Entity<PersonView>(entity =>
                 {
                     entity.HasNoKey();
                 });
@@ -93,19 +65,32 @@ namespace EfCoreRawSqlBug
             {
                 using (TestContext dc = contextGenerator.GenerateTestContext())
                 {
-                    // this will succeed
-                    // This generates SQL:
-                    // SELECT [Name] FROM [test].[Cars] ORDER BY [Name]
-                    Assert.Empty(await dc.CarViews.FromSqlRaw("SELECT [Name] FROM [test].[Cars] ORDER BY [Name]").ToListAsync());
+                    dc.Cars.Add(new Car { CarID = 1, Name = null });
+                    await dc.SaveChangesAsync();
 
-                    // This will fail
-                    // This generates SQL:
-                    // SELECT [p].[Discriminator], [p].[Name], [p].[ParentID]
-                    // FROM(
-                    //    SELECT[Name], 11 AS[ParentID] FROM[test].[People] ORDER BY[Name]
-                    // ) AS[p]
-                    // WHERE[p].[Discriminator] = N'ParentView'
-                    Assert.Empty(await dc.ParentViews.FromSqlRaw("SELECT [Name], 11 AS [ParentID] FROM [test].[People] ORDER BY [Name]").ToListAsync());
+                    // Fake query simulating a response where ALL of the columns were NULL
+                    List<CarView> allNullFields = await dc.CarViews.FromSqlRaw("SELECT NULL as [Name], NULL AS [Count], NULL AS [Price] FROM [test].[Cars]").ToListAsync();
+
+                    // Fake query simulating a response where SOME but not all of the columns were NULL
+                    List<CarView> someNullFields = await dc.CarViews.FromSqlRaw("SELECT NULL as [Name], 123 AS [Count], NULL AS [Price] FROM [test].[Cars]").ToListAsync();
+
+                    Assert.Single(someNullFields);
+                    Assert.NotNull(someNullFields.First());
+                    Assert.Collection(someNullFields, cv =>
+                    {
+                        Assert.Null(cv.Name);
+                        Assert.Equal(123, cv.Count);
+                        Assert.Null(cv.Price);
+                    });
+
+                    Assert.Single(allNullFields);
+                    Assert.NotNull(allNullFields.First());
+                    Assert.Collection(allNullFields, cv =>
+                    {
+                        Assert.Null(cv.Name);
+                        Assert.Null(cv.Count);
+                        Assert.Null(cv.Price);
+                    });
                 }
             }
         }
